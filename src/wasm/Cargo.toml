@@ -12,6 +12,7 @@ kagippcore = { path = "../core" }
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 wasm-bindgen-futures = "0.4.40"
 getrandom = { version = "0.2", features = ["js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 serde = "1"
 serde_json = "1.0"
 panic_handler = { path = "../panic_handler" }

@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use p384::NistP384;
 use privacypass::{Nonce, NonceStore, TruncatedTokenKeyId};
+use privacypass::common::store::PrivateKeyStore;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use voprf::{Ristretto255, VoprfServer};
@@ -19,20 +20,24 @@ pub struct MemoryNonceStore {
 
 #[async_trait]
 impl NonceStore for MemoryNonceStore {
-    async fn exists(&self, nonce: &Nonce) -> bool {
-        let nonces = self
-            .nonces
-            .lock()
-            .expect("MemoryNonceStore .lock() failed on .exists()");
-        nonces.contains(nonce)
-    }
-
-    async fn insert(&self, nonce: Nonce) {
+    async fn reserve(&self, nonce: &Nonce) -> bool {
         let mut nonces = self
             .nonces
             .lock()
-            .expect("MemoryNonceStore .lock() failed on .insert()");
-        nonces.insert(nonce);
+            .expect("MemoryNonceStore .lock() failed on .reserve()");
+        nonces.insert(*nonce)
+    }
+
+    async fn commit(&self, _nonce: &Nonce) {
+        // Already inserted in reserve(); nothing more to do for this in-memory store.
+    }
+
+    async fn release(&self, nonce: &Nonce) {
+        let mut nonces = self
+            .nonces
+            .lock()
+            .expect("MemoryNonceStore .lock() failed on .release()");
+        nonces.remove(nonce);
     }
 }
 
@@ -42,19 +47,23 @@ pub struct MemoryKeyStoreRistretto255 {
 }
 
 #[async_trait]
-impl privacypass::batched_tokens_ristretto255::server::BatchedKeyStore
-    for MemoryKeyStoreRistretto255
-{
+impl PrivateKeyStore for MemoryKeyStoreRistretto255 {
+    type CS = Ristretto255;
+
     async fn insert(
         &self,
         truncated_token_key_id: TruncatedTokenKeyId,
         server: VoprfServer<Ristretto255>,
-    ) {
+    ) -> bool {
         let mut keys = self
             .keys
             .lock()
             .expect("MemoryKeyStoreRistretto255 .lock() failed on .insert()");
+        if keys.contains_key(&truncated_token_key_id) {
+            return false;
+        }
         keys.insert(truncated_token_key_id, server);
+        true
     }
 
     async fn get(
@@ -67,6 +76,14 @@ impl privacypass::batched_tokens_ristretto255::server::BatchedKeyStore
             .get(truncated_token_key_id)
             .cloned()
     }
+
+    async fn remove(&self, truncated_token_key_id: &TruncatedTokenKeyId) -> bool {
+        let mut keys = self
+            .keys
+            .lock()
+            .expect("MemoryKeyStoreRistretto255 .lock() failed on .remove()");
+        keys.remove(truncated_token_key_id).is_some()
+    }
 }
 
 #[derive(Default)]
@@ -75,17 +92,23 @@ pub struct MemoryKeyStoreP384 {
 }
 
 #[async_trait]
-impl privacypass::batched_tokens_p384::server::BatchedKeyStore for MemoryKeyStoreP384 {
+impl PrivateKeyStore for MemoryKeyStoreP384 {
+    type CS = NistP384;
+
     async fn insert(
         &self,
         truncated_token_key_id: TruncatedTokenKeyId,
         server: VoprfServer<NistP384>,
-    ) {
+    ) -> bool {
         let mut keys = self
             .keys
             .lock()
             .expect("MemoryKeyStoreP384 .lock() failed on .insert()");
+        if keys.contains_key(&truncated_token_key_id) {
+            return false;
+        }
         keys.insert(truncated_token_key_id, server);
+        true
     }
 
     async fn get(
@@ -97,5 +120,13 @@ impl privacypass::batched_tokens_p384::server::BatchedKeyStore for MemoryKeyStor
             .expect("MemoryKeyStoreP384 .lock() failed on .get()")
             .get(truncated_token_key_id)
             .cloned()
+    }
+
+    async fn remove(&self, truncated_token_key_id: &TruncatedTokenKeyId) -> bool {
+        let mut keys = self
+            .keys
+            .lock()
+            .expect("MemoryKeyStoreP384 .lock() failed on .remove()");
+        keys.remove(truncated_token_key_id).is_some()
     }
 }

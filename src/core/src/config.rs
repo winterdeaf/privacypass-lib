@@ -8,9 +8,8 @@ use crate::batched_memory_stores::MemoryKeyStoreRistretto255;
 #[cfg(not(target_arch = "wasm32"))]
 pub type MemoryKeyStore = MemoryKeyStoreRistretto255;
 
-pub use privacypass::batched_tokens_ristretto255 as batched_tokens_mod;
 #[cfg(not(target_arch = "wasm32"))]
-pub use privacypass::TokenType::BatchedTokenRistretto255 as GroupTokenType;
+pub use privacypass::TokenType::PrivateRistretto255 as GroupTokenType;
 
 // if true, debug messages are printed to stdout
 #[cfg(not(target_arch = "wasm32"))]

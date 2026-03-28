@@ -2,6 +2,7 @@
 extern crate panic_handler;
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 mod batched_memory_stores;
 
 #[derive(Serialize, Deserialize)]
