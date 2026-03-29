@@ -4,7 +4,7 @@
 
 #![allow(unreachable_patterns)] // used to catch possible error types not yet defined by dependencies
 
-use crate::config::{batched_tokens_mod, GroupTokenType, MemoryKeyStore, VoprfGroup, VERBOSE};
+use crate::config::{GroupTokenType, MemoryKeyStore, VoprfGroup, VERBOSE};
 
 use crate::batched_memory_stores::MemoryNonceStore;
 use crate::crystal::{
@@ -12,22 +12,30 @@ use crate::crystal::{
     encode_string_for_crystal, error_json_retval, CrystalErrorType, JSONRetVal,
 };
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
-use batched_tokens_mod::{
-    server::{serialize_public_key, RedeemTokenError, Server},
-    BatchedToken, BlindedElement, PublicKey, TokenRequest, TokenResponse,
-};
 use generic_array::GenericArray;
 use http::{HeaderName, HeaderValue};
-use privacypass::batched_tokens_ristretto255::server::{
-    CreateKeypairError, IssueTokenResponseError,
+use privacypass::amortized_tokens::{AmortizedBatchTokenRequest, AmortizedBatchTokenResponse, AmortizedToken, server::Server};
+use privacypass::common::{
+    errors::{CreateKeypairError, IssueTokenResponseError, RedeemTokenError},
+    private::serialize_public_key,
 };
 use privacypass::{auth::authenticate::TokenChallenge, TokenType, TruncatedTokenKeyId};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::digest::OutputSizeUser;
 use std::ffi::c_char;
 use thiserror::Error;
-use tls_codec::{Deserialize as TlsDeserializeTrait, Serialize as TlsSerializeTrait, TlsVecU16};
-use tls_codec_derive::{TlsDeserialize, TlsSerialize, TlsSize};
+use tls_codec::{Deserialize as TlsDeserializeTrait, Serialize as TlsSerializeTrait};
+use typenum::Unsigned;
+use voprf::{derive_key, Group, Mode};
+
+use privacypass::auth::authenticate::build_www_authenticate_header;
+use privacypass::auth::authenticate::RedemptionContext;
+
+type TokenRequest = AmortizedBatchTokenRequest<VoprfGroup>;
+type TokenResponse = AmortizedBatchTokenResponse<VoprfGroup>;
+type BatchedToken = AmortizedToken<VoprfGroup>;
+type PublicKey = <VoprfGroup as Group>::Elem;
 
 #[derive(Serialize, Deserialize)]
 struct KeyPair {
@@ -60,42 +68,10 @@ struct MyTokenReqState {
     blinds_s: Vec<HexBlind>,
 }
 
-/// Token request as specified in the spec, but with a modifiable list of blinded_elements
-/// Adapted from privacypass/src/batched_tokens_ristretto.rs
-#[derive(Debug, TlsDeserialize, TlsSerialize, TlsSize)]
-pub struct MyTokenRequest {
-    token_type: TokenType,
-    truncated_token_key_id: TruncatedTokenKeyId,
-    blinded_elements: TlsVecU16<BlindedElement>,
-}
-impl MyTokenRequest {
-    /// Returns the number of blinded elements
-    #[must_use]
-    pub fn nr(&self) -> usize {
-        self.blinded_elements.len()
-    }
-
-    pub fn truncate(&mut self, max_elements: usize) {
-        if self.nr() <= max_elements {
-            return;
-        }
-
-        for _ in max_elements..self.nr() {
-            self.blinded_elements.pop();
-        }
-    }
-
-    pub fn to_token_request(&self) -> Result<TokenRequest, tls_codec::Error> {
-        let res_vec = self.tls_serialize_detached()?;
-        let token_request = TokenRequest::tls_deserialize(&mut res_vec.as_slice());
-        token_request
-    }
-}
-
-use privacypass::auth::authenticate::build_www_authenticate_header;
-use voprf::{derive_key, Group, Mode};
-
-use privacypass::auth::authenticate::RedemptionContext;
+// Size of a serialized AmortizedToken<VoprfGroup>:
+// token_type(2) + nonce(32) + challenge_digest(32) + token_key_id(32) + authenticator(Nk)
+type HashOutputLen = <<VoprfGroup as voprf::CipherSuite>::Hash as OutputSizeUser>::OutputSize;
+const TOKEN_SIZE: usize = 2 + 32 + 32 + 32 + <HashOutputLen as Unsigned>::USIZE;
 
 #[no_mangle]
 pub extern "C" fn gen_keys() -> *const c_char {
@@ -114,20 +90,20 @@ pub extern "C" fn gen_keys() -> *const c_char {
         // generate keys
         let rt = tokio::runtime::Runtime::new()?;
         let key_store = MemoryKeyStore::default();
-        let server = Server::new();
+        let server = Server::<VoprfGroup>::new();
         let public_key = rt.block_on(async {
             server
                 .create_keypair_with_params(&key_store, &seed, info)
                 .await
         })?;
 
-        // serialise keys
-        let pk_s = URL_SAFE.encode(serialize_public_key(public_key));
-        let sk_bytes = match derive_key::<VoprfGroup>(&seed, info, Mode::Voprf) {
-            Ok(res) => Ok(res.to_bytes()),
-            Err(_) => Err(crystal_error("failed generating secret key")),
-        }?;
-        let sk_s = URL_SAFE.encode(sk_bytes);
+        // serialise public key
+        let pk_s = URL_SAFE.encode(serialize_public_key::<VoprfGroup>(public_key));
+
+        // derive private key scalar from seed
+        let sk_scalar = derive_key::<VoprfGroup>(&seed, info, Mode::Voprf)
+            .map_err(|_| crystal_error("failed generating secret key"))?;
+        let sk_s = URL_SAFE.encode(<VoprfGroup as Group>::serialize_scalar(sk_scalar).as_slice());
 
         // construct keypair structure
         let keypair: KeyPair = KeyPair {
@@ -254,29 +230,16 @@ pub extern "C" fn gen_token_response(
         let token_request_bytes = URL_SAFE.decode(token_request_s)?;
 
         // parse token request
-        let mut token_request = TokenRequest::tls_deserialize(&mut token_request_bytes.as_slice())?;
-        let max_nr_usize = usize::from(max_nr);
-        if token_request.nr() > max_nr_usize {
-            let mut temp_token_request =
-                MyTokenRequest::tls_deserialize(&mut token_request_bytes.as_slice())?;
-            temp_token_request.truncate(max_nr_usize);
-            token_request = temp_token_request.to_token_request()?;
-            if VERBOSE {
-                println!(
-                    "R: TokenRequest was truncated to {:?} elements",
-                    token_request.nr()
-                );
-            }
-        }
+        let token_request =
+            TokenRequest::tls_deserialize(&mut token_request_bytes.as_slice())?;
 
         let key_store = MemoryKeyStore::default();
-        let server = Server::new();
+        let server = Server::<VoprfGroup>::with_max_batch_size(usize::from(max_nr));
         rt.block_on(async {
             let _public_key = server.set_key(&key_store, &private_key).await?;
             Ok::<PublicKey, Box<dyn std::error::Error>>(_public_key)
         })?;
 
-        // generate token response
         let token_response = rt.block_on(async {
             let _token_response = server
                 .issue_token_response(&key_store, token_request)
@@ -316,20 +279,18 @@ pub extern "C" fn validate_token(
 
         // parse inputs
         let private_key = unsafe { decode_bytes_from_crystal(sk_cstr)? };
-        // let token_bytes = decode_bytes_from_crystal(token_cstr)?;
         let token_s = unsafe { decode_string_from_crystal(token_cstr)? };
         let token_s_2 = token_s.clone();
         let token_bytes = URL_SAFE.decode(token_s)?;
         let token_bytes_2 = token_bytes.clone();
 
         // check we did get the right amount of bytes for a token
-        match token_bytes.len() == std::mem::size_of::<BatchedToken>() {
+        match token_bytes.len() == TOKEN_SIZE {
             true => Ok(()),
             false => Err(crystal_error("incorrect number of bytes for a token")),
         }?;
 
         // check we didn't get an alternative URL_SAFE encoding due to malleability of base64
-        // NOTE: may be overkill, dependingo n how URL_SAFE.decode is implemented
         let token_s_prime = URL_SAFE.encode(token_bytes_2);
         match token_s_2 == token_s_prime {
             true => Ok(()),
@@ -343,7 +304,7 @@ pub extern "C" fn validate_token(
 
         // load secret key
         let key_store = MemoryKeyStore::default();
-        let server = Server::new();
+        let server = Server::<VoprfGroup>::new();
 
         // NOTE: this line loads the public key into the keystore.
         // this allows correctly redeeming the token later on.
@@ -379,9 +340,9 @@ pub extern "C" fn validate_token(
                 .await {
                 Ok(_) => Ok::<bool, CrystalErrorType>(true),
                 Err(err) => match err {
-                    RedeemTokenError::InvalidToken => Ok::<bool, CrystalErrorType>(false),
-                    RedeemTokenError::DoubleSpending => Err(crystal_error("doubly spent token (should never hit this)")), // we just created an empty nonce_store, how did you hit this???
-                    RedeemTokenError::KeyIdNotFound => Err(crystal_error("key id not found")), // we just loaded the key, is the token for some key that just expired?
+                    RedeemTokenError::AuthenticatorMismatch { .. } => Ok::<bool, CrystalErrorType>(false),
+                    RedeemTokenError::DoubleSpending => Err(crystal_error("doubly spent token (should never hit this)")),
+                    RedeemTokenError::KeyIdNotFound => Err(crystal_error("key id not found")),
                     _ => Err(crystal_error("unrecognized RedeemTokenError, was the privacypass-rust library updated with a new one?"))
                 }
             }
@@ -448,7 +409,7 @@ pub enum GenTokenResponseError {
 #[derive(Debug)]
 pub struct RustKeypair {
     pub public_key: Vec<u8>,
-    pub secret_key: [u8; 32],
+    pub secret_key: Vec<u8>,
     pub token_type: TokenType,
 }
 
@@ -462,12 +423,12 @@ impl PrivacyPass {
         token: &[u8],
         private_key: &[u8],
     ) -> Result<bool, ValidateTokenError> {
-        if token.len() != std::mem::size_of::<BatchedToken>() {
+        if token.len() != TOKEN_SIZE {
             return Err(ValidateTokenError::WrongTokenSize(token.len()));
         }
 
         // Needed to make sure public key is in key store.
-        let server = Server::new();
+        let server = Server::<VoprfGroup>::new();
         let key_store = MemoryKeyStore::default();
         let nonce_store = MemoryNonceStore::default();
         let _pub_key = server.set_key(&key_store, private_key).await?;
@@ -481,9 +442,9 @@ impl PrivacyPass {
         {
             Ok(_) => Ok(true),
             Err(err) => match err {
-                RedeemTokenError::InvalidToken => Ok(false),
-                RedeemTokenError::DoubleSpending => Err(ValidateTokenError::DoubleSpending), // we just created an empty nonce_store, how did you hit this???
-                RedeemTokenError::KeyIdNotFound => Err(ValidateTokenError::KeyIdNotFound), // we just loaded the key, is the token for some key that just expired?
+                RedeemTokenError::AuthenticatorMismatch { .. } => Ok(false),
+                RedeemTokenError::DoubleSpending => Err(ValidateTokenError::DoubleSpending),
+                RedeemTokenError::KeyIdNotFound => Err(ValidateTokenError::KeyIdNotFound),
                 e => Err(ValidateTokenError::RedeemToken(e)),
             },
         }
@@ -497,19 +458,19 @@ impl PrivacyPass {
         // setting domain separation for VOPRF secret key generation
         // as recommended by RFC 9578 (PP issuance protocol), section 5.5
         let info = b"PrivacyPass";
-        let server = Server::new();
+        let server = Server::<VoprfGroup>::new();
         let key_store = MemoryKeyStore::default();
 
         let public_key = server
             .create_keypair_with_params(&key_store, &seed, info)
             .await?;
 
-        let secret_key =
-            derive_key::<VoprfGroup>(&seed, info, Mode::Voprf).map_err(GenKeysError::DeriveKey)?;
+        let sk_scalar = derive_key::<VoprfGroup>(&seed, info, Mode::Voprf)
+            .map_err(GenKeysError::DeriveKey)?;
 
         Ok(RustKeypair {
-            public_key: serialize_public_key(public_key),
-            secret_key: secret_key.to_bytes(),
+            public_key: serialize_public_key::<VoprfGroup>(public_key),
+            secret_key: <VoprfGroup as Group>::serialize_scalar(sk_scalar).to_vec(),
             token_type: TokenType::BatchedTokenRistretto255,
         })
     }
@@ -544,7 +505,7 @@ impl PrivacyPass {
             ));
         }
 
-        let server = Server::new();
+        let server = Server::<VoprfGroup>::with_max_batch_size(usize::MAX);
         let key_store = MemoryKeyStore::default();
 
         server.set_key(&key_store, private_key).await?;

@@ -1,0 +1,197 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -43,6 +43,8 @@
+     Public = 2,
+     /// Private ristretto255 token
+     PrivateRistretto255 = 5,
++    /// Batched token ristretto255 (legacy wire type 0xF91A, used by servers not yet upgraded)
++    BatchedTokenRistretto255 = 0xF91A,
+ }
+
+ /// Token key ID
+--- a/src/amortized_tokens/request.rs
++++ b/src/amortized_tokens/request.rs
+@@ -1,8 +1,7 @@
+ //! Request implementation of the Amortized Tokens protocol.
+
+ use rand::{Rng, rngs::OsRng};
+-use tls_codec::{Deserialize, Serialize, Size};
+-use tls_codec_derive::{TlsDeserialize, TlsSerialize, TlsSize};
++use tls_codec::{Deserialize, Serialize, Size, TlsVecU16};
+ use typenum::Unsigned;
+ use voprf::{Group, Result, VoprfClient};
+
+@@ -54,10 +53,10 @@
+ /// struct {
+ ///     uint16_t token_type;
+ ///     uint8_t truncated_token_key_id;
+-///     BlindedElement blinded_element<V>;
++///     BlindedElement blinded_element<Nr>;  // U16 byte-count prefix
+ /// } AmortizedBatchTokenRequest;
+ /// ```
+-#[derive(Debug, TlsDeserialize, TlsSerialize, TlsSize)]
++#[derive(Debug)]
+ pub struct AmortizedBatchTokenRequest<CS: PrivateCipherSuite> {
+     pub(crate) token_type: TokenType,
+     pub(crate) truncated_token_key_id: TruncatedTokenKeyId,
+@@ -214,3 +213,52 @@
+         })
+     }
+ }
++
++// Manual TLS impls for AmortizedBatchTokenRequest using TlsVecU16 (2-byte big-endian byte-count
++// prefix) for blinded_elements, matching the old batched-token wire format used by servers that
++// have not yet been upgraded to the QUIC-VLN encoding.
++
++impl<CS: PrivateCipherSuite> Size for AmortizedBatchTokenRequest<CS> {
++    fn tls_serialized_len(&self) -> usize {
++        let elem_len = <<CS::Group as Group>::ElemLen as Unsigned>::USIZE;
++        // token_type(2) + truncated_token_key_id(1) + length_prefix(2) + elements
++        2 + 1 + 2 + self.blinded_elements.len() * elem_len
++    }
++}
++
++impl<CS: PrivateCipherSuite> Serialize for AmortizedBatchTokenRequest<CS> {
++    fn tls_serialize<W: std::io::Write>(
++        &self,
++        writer: &mut W,
++    ) -> std::result::Result<usize, tls_codec::Error> {
++        let elem_len = <<CS::Group as Group>::ElemLen as Unsigned>::USIZE;
++        let byte_count = (self.blinded_elements.len() * elem_len) as u16;
++        let mut written = self.token_type.tls_serialize(writer)?;
++        written += self.truncated_token_key_id.tls_serialize(writer)?;
++        writer.write_all(&byte_count.to_be_bytes())?;
++        written += 2;
++        for element in &self.blinded_elements {
++            written += element.tls_serialize(writer)?;
++        }
++        Ok(written)
++    }
++}
++
++impl<CS: PrivateCipherSuite> Deserialize for AmortizedBatchTokenRequest<CS> {
++    fn tls_deserialize<R: std::io::Read>(
++        bytes: &mut R,
++    ) -> std::result::Result<Self, tls_codec::Error>
++    where
++        Self: Sized,
++    {
++        let token_type = TokenType::tls_deserialize(bytes)?;
++        let truncated_token_key_id = TruncatedTokenKeyId::tls_deserialize(bytes)?;
++        // Read TlsVecU16-style 2-byte big-endian byte count.
++        let elements_vec = TlsVecU16::<BlindedElement<CS>>::tls_deserialize(bytes)?;
++        Ok(AmortizedBatchTokenRequest {
++            token_type,
++            truncated_token_key_id,
++            blinded_elements: elements_vec.into(),
++        })
++    }
++}
+--- a/src/amortized_tokens/response.rs
++++ b/src/amortized_tokens/response.rs
+@@ -2,7 +2,7 @@
+
+ use generic_array::GenericArray;
+ use log::warn;
+-use tls_codec::{Deserialize, Serialize, Size};
++use tls_codec::{Deserialize, Serialize, Size, TlsVecU16};
+ use typenum::Unsigned;
+ use voprf::{EvaluationElement, Group, Proof, Result, VoprfClient};
+
+@@ -179,10 +179,16 @@
+     }
+ }
+
++// Manual TLS impls for AmortizedBatchTokenResponse using TlsVecU16 (2-byte big-endian byte-count
++// prefix) for evaluated_elements, matching the old batched-token wire format used by servers that
++// have not yet been upgraded to the QUIC-VLN encoding.
++
+ impl<CS: PrivateCipherSuite> Size for AmortizedBatchTokenResponse<CS> {
+     fn tls_serialized_len(&self) -> usize {
+-        let len = 2 * <<CS::Group as Group>::ScalarLen as Unsigned>::USIZE;
+-        self.evaluated_elements.tls_serialized_len() + len
++        let elem_len = <<CS::Group as Group>::ElemLen as Unsigned>::USIZE;
++        let proof_len = 2 * <<CS::Group as Group>::ScalarLen as Unsigned>::USIZE;
++        // length_prefix(2) + elements + proof
++        2 + self.evaluated_elements.len() * elem_len + proof_len
+     }
+ }
+
+@@ -193,14 +199,14 @@
+     where
+         Self: Sized,
+     {
+-        let evaluated_elements = Vec::<EvaluatedElement<CS>>::tls_deserialize(bytes)?;
+-        let len = 2 * <<CS::Group as Group>::ScalarLen as Unsigned>::USIZE;
+-        // read len bytes
+-        let mut evaluated_proof = vec![0u8; len];
++        // Read TlsVecU16-style 2-byte big-endian byte count.
++        let elements_vec = TlsVecU16::<EvaluatedElement<CS>>::tls_deserialize(bytes)?;
++        let proof_len = 2 * <<CS::Group as Group>::ScalarLen as Unsigned>::USIZE;
++        let mut evaluated_proof = vec![0u8; proof_len];
+         bytes.read_exact(&mut evaluated_proof)?;
+         Ok(AmortizedBatchTokenResponse {
+             _marker: std::marker::PhantomData,
+-            evaluated_elements,
++            evaluated_elements: elements_vec.into(),
+             evaluated_proof,
+         })
+     }
+@@ -211,7 +217,13 @@
+         &self,
+         writer: &mut W,
+     ) -> std::result::Result<usize, tls_codec::Error> {
+-        let written = self.evaluated_elements.tls_serialize(writer)?;
++        let elem_len = <<CS::Group as Group>::ElemLen as Unsigned>::USIZE;
++        let byte_count = (self.evaluated_elements.len() * elem_len) as u16;
++        writer.write_all(&byte_count.to_be_bytes())?;
++        let mut written = 2;
++        for element in &self.evaluated_elements {
++            written += element.tls_serialize(writer)?;
++        }
+         writer.write_all(&self.evaluated_proof)?;
+         Ok(written + self.evaluated_proof.len())
+     }
+--- a/src/amortized_tokens/server.rs
++++ b/src/amortized_tokens/server.rs
+@@ -124,7 +124,12 @@
+         key_store: &BKS,
+         token_request: AmortizedBatchTokenRequest<CS>,
+     ) -> Result<AmortizedBatchTokenResponse<CS>, IssueTokenResponseError> {
+-        if token_request.token_type != CS::token_type() {
++        // Also accept BatchedTokenRistretto255 (0xF91A) when the cipher suite uses PrivateRistretto255,
++        // for wire compatibility with servers using the legacy batched-token format.
++        let types_compatible = token_request.token_type == CS::token_type()
++            || (token_request.token_type == crate::TokenType::BatchedTokenRistretto255
++                && CS::token_type() == crate::TokenType::PrivateRistretto255);
++        if !types_compatible {
+             return Err(IssueTokenResponseError::InvalidTokenType {
+                 expected: CS::token_type(),
+                 found: token_request.token_type,
+@@ -186,7 +191,11 @@
+         token: AmortizedToken<CS>,
+     ) -> Result<(), RedeemTokenError> {
+         let token_type = token.token_type();
+-        if token_type != CS::token_type() {
++        // Also accept BatchedTokenRistretto255 (0xF91A) when the cipher suite uses PrivateRistretto255.
++        let types_compatible = token_type == CS::token_type()
++            || (token_type == crate::TokenType::BatchedTokenRistretto255
++                && CS::token_type() == crate::TokenType::PrivateRistretto255);
++        if !types_compatible {
+             return Err(RedeemTokenError::TokenTypeMismatch {
+                 expected: CS::token_type(),
+                 found: token_type,
+--- a/src/generic_tokens/request.rs
++++ b/src/generic_tokens/request.rs
+@@ -200,6 +200,11 @@
+                     token_request,
+                 )))
+             }
++            TokenType::BatchedTokenRistretto255 => {
++                Err(tls_codec::Error::DecodingError(
++                    "BatchedTokenRistretto255 is not a generic token type".to_string(),
++                ))
++            }
+         }
+     }
+ }

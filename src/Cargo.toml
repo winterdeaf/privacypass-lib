@@ -10,3 +10,6 @@ opt-level = 1
 
 [profile.release]
 opt-level = 3
+
+[patch.'https://github.com/raphaelrobert/privacypass']
+privacypass = { path = "vendor/privacypass" }
