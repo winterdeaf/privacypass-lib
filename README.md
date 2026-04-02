@@ -11,7 +11,7 @@ This is an LLM-assisted port of the privacy pass core library, with the followin
 2. Update the dependencies: switch to current versions of [privacypass](https://github.com/raphaelrobert/privacypass), [voprf](https://github.com/facebook/voprf) and [blind-rsa-signatures](https://github.com/jedisct1/rust-blind-rsa-signatures).
 
 This required some hacks (mostly in the form of privacypass patches) in order to maintain wire format compatibility with the Kagi servers.
-**Note that neither this fork, nor [privacypass](https://github.com/raphaelrobert/privacypass)have been audited, and I did not review all of the LLM-edited changes in detail.**
+**Note that neither this fork, nor [privacypass](https://github.com/raphaelrobert/privacypass) have been audited, and I did not review all of the LLM-edited changes in detail.**
 
 
 ## Building using Docker
