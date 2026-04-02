@@ -3,6 +3,17 @@
 This repository contains the source code of the core library implementing the Privacy Pass API used by [Kagi](https://blog.kagi.com/kagi-privacy-pass).
 This repository is not meant to be used as stand-alone, but rather as a submodule for other projects.
 
+## Disclaimers about this fork
+
+This is an LLM-assisted port of the privacy pass core library, with the following two goals:
+
+1. Update the rust toolchain from v1.84 to v1.94;
+2. Update the dependencies: switch to current versions of [privacypass](https://github.com/raphaelrobert/privacypass), [voprf](https://github.com/facebook/voprf) and [blind-rsa-signatures](https://github.com/jedisct1/rust-blind-rsa-signatures).
+
+This required some hacks (mostly in the form of privacypass patches) in order to maintain wire format compatibility with the Kagi servers.
+**Note that neither this fork, nor [privacypass](https://github.com/raphaelrobert/privacypass)have been audited, and I did not review all of the LLM-edited changes in detail.**
+
+
 ## Building using Docker
 
 To build this library, install Docker and run
