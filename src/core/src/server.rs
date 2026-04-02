@@ -19,7 +19,7 @@ use privacypass::common::{
     errors::{CreateKeypairError, IssueTokenResponseError, RedeemTokenError},
     private::serialize_public_key,
 };
-use privacypass::{auth::authenticate::TokenChallenge, TokenType, TruncatedTokenKeyId};
+use privacypass::{auth::authenticate::TokenChallenge, TokenType};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::digest::OutputSizeUser;
@@ -44,30 +44,6 @@ struct KeyPair {
     token_type: u16,
     error: String,
 }
-#[derive(Serialize, Deserialize)]
-struct JSONTokens {
-    tokens: Vec<String>,
-    error: String,
-}
-#[derive(Serialize, Deserialize)]
-struct HexNonce(#[serde(with = "hex")] Vec<u8>);
-
-#[derive(Serialize, Deserialize)]
-struct HexBlind(#[serde(with = "hex")] Vec<u8>);
-
-#[derive(Serialize, Deserialize)]
-struct StateTokenRequestRetval {
-    token_request: String,
-    state: String,
-    error: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MyTokenReqState {
-    nonces_s: Vec<HexNonce>,
-    blinds_s: Vec<HexBlind>,
-}
-
 // Size of a serialized AmortizedToken<VoprfGroup>:
 // token_type(2) + nonce(32) + challenge_digest(32) + token_key_id(32) + authenticator(Nk)
 type HashOutputLen = <<VoprfGroup as voprf::CipherSuite>::Hash as OutputSizeUser>::OutputSize;

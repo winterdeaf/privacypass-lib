@@ -6,7 +6,6 @@
 // Just in case, we add a message to the panic.
 
 use async_trait::async_trait;
-use p384::NistP384;
 use privacypass::{Nonce, NonceStore, TruncatedTokenKeyId};
 use privacypass::common::store::PrivateKeyStore;
 use std::collections::{HashMap, HashSet};
@@ -86,47 +85,3 @@ impl PrivateKeyStore for MemoryKeyStoreRistretto255 {
     }
 }
 
-#[derive(Default)]
-pub struct MemoryKeyStoreP384 {
-    keys: Mutex<HashMap<TruncatedTokenKeyId, VoprfServer<NistP384>>>,
-}
-
-#[async_trait]
-impl PrivateKeyStore for MemoryKeyStoreP384 {
-    type CS = NistP384;
-
-    async fn insert(
-        &self,
-        truncated_token_key_id: TruncatedTokenKeyId,
-        server: VoprfServer<NistP384>,
-    ) -> bool {
-        let mut keys = self
-            .keys
-            .lock()
-            .expect("MemoryKeyStoreP384 .lock() failed on .insert()");
-        if keys.contains_key(&truncated_token_key_id) {
-            return false;
-        }
-        keys.insert(truncated_token_key_id, server);
-        true
-    }
-
-    async fn get(
-        &self,
-        truncated_token_key_id: &TruncatedTokenKeyId,
-    ) -> Option<VoprfServer<NistP384>> {
-        self.keys
-            .lock()
-            .expect("MemoryKeyStoreP384 .lock() failed on .get()")
-            .get(truncated_token_key_id)
-            .cloned()
-    }
-
-    async fn remove(&self, truncated_token_key_id: &TruncatedTokenKeyId) -> bool {
-        let mut keys = self
-            .keys
-            .lock()
-            .expect("MemoryKeyStoreP384 .lock() failed on .remove()");
-        keys.remove(truncated_token_key_id).is_some()
-    }
-}

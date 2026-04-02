@@ -3,7 +3,7 @@
 use crate::config::VoprfGroup;
 use crate::crystal::{
     crystal_error, decode_bytes_from_crystal, decode_string_from_crystal,
-    encode_string_for_crystal, error_json_retval, CrystalErrorType, JSONRetVal,
+    encode_string_for_crystal, error_json_retval, JSONRetVal,
 };
 use crate::NONCE_BYTES;
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
@@ -18,13 +18,6 @@ use voprf::Group;
 
 use http::header::HeaderValue;
 
-#[derive(Serialize, Deserialize)]
-struct KeyPair {
-    sk: String,
-    pk: String,
-    token_type: u16,
-    error: String,
-}
 #[derive(Serialize, Deserialize)]
 pub struct JSONTokens {
     pub tokens: Vec<String>,
